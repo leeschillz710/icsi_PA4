@@ -5,6 +5,7 @@ import Login from "./components/Login";
 import CreateProject from "./components/CreateProject";
 import ProjectList from "./components/ProjectList";
 import ProjectMembers from "./components/ProjectMembers";
+import ProjectBacklog from "./components/ProjectBacklog";
 
 // ALL frontend requests are sent to the Express server
 const API_URL = "http://localhost:9000";
@@ -19,6 +20,12 @@ function App() {
         useState("");
     // store errors related to loading shared application data
     const [dataError, setDataError] = useState("");
+    // Reload backlog membership choices after members change.
+    const [membershipVersion, setMembershipVersion] = useState(0);
+
+    function handleMembersChanged() {
+        setMembershipVersion((version) => version + 1);
+}
 
     // load users and projects when App first appears.
     useEffect(() => {
@@ -158,10 +165,19 @@ function App() {
                 selectedProjectId={selectedProjectId}
                 onSelectProject={setSelectedProjectId}
             />
-
+            
             <ProjectMembers
+                key={selectedProjectId || "members"}
                 project={selectedProject}
                 users={users}
+                onMembersChanged={handleMembersChanged}
+            />
+
+            <ProjectBacklog
+                key={selectedProjectId || "backlog"}
+                project={selectedProject}
+                users={users}
+                membershipVersion={membershipVersion}
             />
         </main>
     );

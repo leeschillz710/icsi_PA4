@@ -28,9 +28,14 @@ const client = new MongoClient(process.env.MONGO_URI);
 let users;
 let projects;
 let projectMemberships;
+let userStories;
 
 // allowed project statuses
 const allowedStatuses = ["Planning", "Active", "Completed"];
+
+// allowed story statuses and priorites
+const allowedStoryStatuses = ["To Do", "In Progress", "Done"];
+const allowedStoryPriorities = ["High", "Medium", "Low"];
 
 // check whether a value is a string that MongoDB can convert into
 // an objectId. This prevents new ObjectId() from throwing an exception
@@ -421,10 +426,34 @@ app.delete(
                     message: "Project was not found."
                 });
             }
-
             if (project.project_lead_id.equals(convertedUserId)) {
                 return res.status(400).json({
                     message: "The project lead cannot be removed."
+                });
+            }
+
+            const user = await users.findOne({
+                _id: convertedUserId
+            });
+
+            if (!user) {
+                return res.status(404).json({
+                    message: "User was not found."
+                });
+            }
+
+            // check assignments only within the selected project.
+            // all story status count, including Done.
+            const assignedStory = await userStories.findOne({
+                project_id: convertedProjectId,
+                assigned_user_id: convertedUserId
+            });
+
+            if (assignedStory) {
+                return res.status(409).json({
+                    message:
+                        "This member still has stories assigned in this project. " +
+                        "Reassign, unassign, or delete those stories before removing the member."
                 });
             }
 
@@ -453,6 +482,351 @@ app.delete(
     }
 );
 
+// ---------- VALIDATE STORY INPUT ----------
+
+async function validateStoryInput(body, projectId) {
+    const {
+        title,
+        description,
+        priority,
+        assigned_user_id
+    } = body;
+
+    // Check types before calling trim().
+    if (
+        typeof title !== "string" ||
+        !title.trim() ||
+        typeof description !== "string" ||
+        !description.trim() ||
+        !allowedStoryPriorities.includes(priority)
+    ) {
+        return {
+            error:
+                "Title, description, and a valid priority " +
+                "(High, Medium, or Low) are required."
+        };
+    }
+
+    // null, an empty dropdown value, or an omitted assignment
+    // means Unassigned.
+    let assignedMemberId = null;
+
+    if (
+        assigned_user_id !== undefined &&
+        assigned_user_id !== null &&
+        assigned_user_id !== ""
+    ) {
+        if (!validId(assigned_user_id)) {
+            return {
+                error: "Invalid assigned member ID."
+            };
+        }
+
+        assignedMemberId = new ObjectId(assigned_user_id);
+
+        // An assignment must refer to a real user.
+        const user = await users.findOne({
+            _id: assignedMemberId
+        });
+
+        if (!user) {
+            return {
+                error: "The assigned user was not found."
+            };
+        }
+
+        // The user must belong to this specific project.
+        const membership = await projectMemberships.findOne({
+            project_id: projectId,
+            user_id: assignedMemberId
+        });
+
+        if (!membership) {
+            return {
+                error:
+                    "The assigned user must be a member " +
+                    "of the selected project."
+            };
+        }
+    }
+
+    return {
+        values: {
+            title: title.trim(),
+            description: description.trim(),
+            priority,
+            assigned_user_id: assignedMemberId
+        }
+    };
+}
+
+// ---------- CREATE USER STORY ----------
+
+app.post("/api/projects/:projectId/stories", async (req, res) => {
+    const { projectId } = req.params;
+
+    if (!validId(projectId)) {
+        return res.status(400).json({
+            message: "Invalid project ID."
+        });
+    }
+
+    try {
+        const convertedProjectId = new ObjectId(projectId);
+
+        const project = await projects.findOne({
+            _id: convertedProjectId
+        });
+
+        if (!project) {
+            return res.status(404).json({
+                message: "Project was not found."
+            });
+        }
+
+        const validation = await validateStoryInput(
+            req.body ?? {},
+            convertedProjectId
+        );
+
+        if (validation.error) {
+            return res.status(400).json({
+                message: validation.error
+            });
+        }
+
+        const story = {
+            project_id: convertedProjectId,
+            ...validation.values,
+
+            // The backend always gives new stories this status.
+            status: "To Do"
+        };
+
+        const result = await userStories.insertOne(story);
+
+        return res.status(201).json({
+            message: "User story created successfully.",
+            story: {
+                ...story,
+                _id: result.insertedId
+            }
+        });
+    } catch (error) {
+        console.error("Create story error:", error);
+
+        return res.status(500).json({
+            message: "Could not create the user story."
+        });
+    }
+});
+
+// ---------- GET PROJECT BACKLOG ----------
+
+app.get("/api/projects/:projectId/stories", async (req, res) => {
+    const { projectId } = req.params;
+
+    if (!validId(projectId)) {
+        return res.status(400).json({
+            message: "Invalid project ID."
+        });
+    }
+
+    try {
+        const convertedProjectId = new ObjectId(projectId);
+
+        const project = await projects.findOne({
+            _id: convertedProjectId
+        });
+
+        if (!project) {
+            return res.status(404).json({
+                message: "Project was not found."
+            });
+        }
+
+        // No status filter: include To Do, In Progress, and Done.
+        const stories = await userStories
+            .find({
+                project_id: convertedProjectId
+            })
+            .sort({ _id: -1 })
+            .toArray();
+
+        return res.status(200).json(stories);
+    } catch (error) {
+        console.error("Get backlog error:", error);
+
+        return res.status(500).json({
+            message: "Could not retrieve the project backlog."
+        });
+    }
+});
+
+// ---------- EDIT USER STORY ----------
+
+app.put(
+    "/api/projects/:projectId/stories/:storyId",
+    async (req, res) => {
+        const { projectId, storyId } = req.params;
+
+        if (!validId(projectId) || !validId(storyId)) {
+            return res.status(400).json({
+                message: "Invalid project or story ID."
+            });
+        }
+
+        try {
+            const convertedProjectId = new ObjectId(projectId);
+            const convertedStoryId = new ObjectId(storyId);
+
+            const project = await projects.findOne({
+                _id: convertedProjectId
+            });
+
+            if (!project) {
+                return res.status(404).json({
+                    message: "Project was not found."
+                });
+            }
+
+            // Match both IDs so a story from another project
+            // cannot be edited through this project's URL.
+            const filter = {
+                _id: convertedStoryId,
+                project_id: convertedProjectId
+            };
+
+            const existingStory = await userStories.findOne(filter);
+
+            if (!existingStory) {
+                return res.status(404).json({
+                    message: "Story was not found in this project."
+                });
+            }
+
+            const body = req.body ?? {};
+
+            // A story must remain in its original project.
+            if (
+                body.project_id !== undefined &&
+                (
+                    !validId(body.project_id) ||
+                    !convertedProjectId.equals(
+                        new ObjectId(body.project_id)
+                    )
+                )
+            ) {
+                return res.status(400).json({
+                    message: "A story cannot be moved to another project."
+                });
+            }
+
+            if (!allowedStoryStatuses.includes(body.status)) {
+                return res.status(400).json({
+                    message:
+                        "Status must be To Do, In Progress, or Done."
+                });
+            }
+
+            // Recheck required fields and current membership.
+            const validation = await validateStoryInput(
+                body,
+                convertedProjectId
+            );
+
+            if (validation.error) {
+                return res.status(400).json({
+                    message: validation.error
+                });
+            }
+
+            const updates = {
+                ...validation.values,
+                status: body.status
+            };
+
+            // Update the existing document. Its _id and
+            // project_id are never included in the changes.
+            const result = await userStories.updateOne(
+                filter,
+                { $set: updates }
+            );
+
+            if (result.matchedCount === 0) {
+                return res.status(404).json({
+                    message: "Story was not found in this project."
+                });
+            }
+
+            return res.status(200).json({
+                message: "User story updated successfully.",
+                story: {
+                    ...existingStory,
+                    ...updates
+                }
+            });
+        } catch (error) {
+            console.error("Edit story error:", error);
+
+            return res.status(500).json({
+                message: "Could not update the user story."
+            });
+        }
+    }
+);
+
+// ---------- DELETE USER STORY ----------
+
+app.delete(
+    "/api/projects/:projectId/stories/:storyId",
+    async (req, res) => {
+        const { projectId, storyId } = req.params;
+
+        if (!validId(projectId) || !validId(storyId)) {
+            return res.status(400).json({
+                message: "Invalid project or story ID."
+            });
+        }
+
+        try {
+            const convertedProjectId = new ObjectId(projectId);
+
+            const project = await projects.findOne({
+                _id: convertedProjectId
+            });
+
+            if (!project) {
+                return res.status(404).json({
+                    message: "Project was not found."
+                });
+            }
+
+            // Delete only a story belonging to this project.
+            const result = await userStories.deleteOne({
+                _id: new ObjectId(storyId),
+                project_id: convertedProjectId
+            });
+
+            if (result.deletedCount === 0) {
+                return res.status(404).json({
+                    message: "Story was not found in this project."
+                });
+            }
+
+            return res.status(200).json({
+                message: "User story deleted successfully."
+            });
+        } catch (error) {
+            console.error("Delete story error:", error);
+
+            return res.status(500).json({
+                message: "Could not delete the user story."
+            });
+        }
+    }
+);
+
 // ----------- SERVER STARTUP ----------
 //------ CONNECT TO MONGODB AND START EXPRESS --------
 
@@ -465,11 +839,17 @@ async function startServer() {
         // users are available to PA3
         const db = client.db("pa2");
 
-        // obtain references to all 3 collections
+        // obtain references to all 4 collections
         users = db.collection("users");
         projects = db.collection("projects");
-        projectMemberships =
-            db.collection("projectMemberships");
+        projectMemberships = db.collection("projectMemberships");
+        userStories = db.collection("userStories");
+
+        // support retrieving a project's backlog and checking assignments.
+        await userStories.createIndex({
+            project_id: 1,
+            assigned_user_id: 1
+        });
         
         // ensure that MongoDB rejects duplicate usernames, even
         // if 2 requests arrive almost simultaneously
@@ -477,6 +857,7 @@ async function startServer() {
             { username: 1 },
             { unique: true }
         );
+
 
         console.log("Connected to MongoDB");
 

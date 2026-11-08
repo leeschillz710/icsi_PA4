@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 const API_URL = "http://localhost:9000";
 
-function ProjectMembers({ project, users }) {
+function ProjectMembers({ project, users, onMembersChanged }) {
     // store the membership documents for the selected project
     const [memberships, setMemberships] = useState([]);
     // store the ID selected in teh Add Member dropdown
@@ -109,6 +109,7 @@ function ProjectMembers({ project, users }) {
             if (response.ok) {
                 setSelectedUserId("");
                 await refreshMembers();
+                onMembersChanged?.();
             }
         } catch (error) {
             console.error("Add member request failed:", error);
@@ -132,6 +133,7 @@ function ProjectMembers({ project, users }) {
 
             if (response.ok) {
                 await refreshMembers();
+                onMembersChanged?.();
             }
         } catch (error) {
             console.error(
