@@ -167,14 +167,14 @@ function App() {
             />
             
             <ProjectMembers
-                key={selectedProjectId || "members"}
+                key={`members-${selectedProjectId}`}
                 project={selectedProject}
                 users={users}
                 onMembersChanged={handleMembersChanged}
             />
 
             <ProjectBacklog
-                key={selectedProjectId || "backlog"}
+                key={`backlog-${selectedProjectId}`}
                 project={selectedProject}
                 users={users}
                 membershipVersion={membershipVersion}
